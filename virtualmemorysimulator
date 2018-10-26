@@ -1,0 +1,496 @@
+
+// Virual Memory Simulator
+// Two-level page table system
+// Inverted page table with a hashing system 
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+
+#define PAGESIZEBITS 12			// page size = 4Kbytes
+#define VIRTUALADDRBITS 32		// virtual address space size = 4Gbytes
+
+int countPage(int n){
+	if (n == 0){
+		return 1;
+	}
+	return 2 * countPage(n - 1);
+}
+
+struct pageTableEntry {
+	int level;				// page table level (1 or 2)
+	char valid;
+	struct pageTableEntry *secondLevelPageTable;	// valid if this entry is for the first level page table (level = 1)
+	int frameNumber;								// valid if this entry is for the second level page table (level = 2)
+};
+
+struct framePage {
+	int number;			// frame number
+	int pid;			// Process id that owns the frame
+	int virtualPageNumber;			// virtual page number using the frame
+	unsigned virtualAddress1;
+	unsigned virtualAddress2;
+	// 링크드 리스트 제일 왼쪽 가르키는 포인터와 제일 오른쪽 가르키는 포인터
+	struct framePage *lruLeft;	// for LRU circular doubly linked list
+	struct framePage *lruRight; // for LRU circular doubly linked list
+};
+
+struct invertedPageTableEntry {
+	int pid;					// process id
+	int virtualPageNumber;		// virtual page number
+	int frameNumber;			// frame number allocated
+	struct invertedPageTableEntry *next;
+};
+
+struct procEntry {
+	char *traceName;			// the memory trace name
+	int pid;					// process (trace) id
+	int ntraces;				// the number of memory traces
+	int num2ndLevelPageTable;	// The 2nd level page created(allocated);
+	int numIHTConflictAccess; 	// The number of Inverted Hash Table Conflict Accesses
+	int numIHTNULLAccess;		// The number of Empty Inverted Hash Table Accesses
+	int numIHTNonNULLAccess;		// The number of Non Empty Inverted Hash Table Accesses
+	int numPageFault;			// The number of page faults
+	int numPageHit;				// The number of page hits
+	struct pageTableEntry *firstLevelPageTable;
+
+	FILE *tracefp;
+};
+
+struct framePage *oldestFrame; // the oldest frame pointer
+
+int firstLevelBits;
+int phyMemSizeBits;// = 15; // 15 - 12 3ㅠbit 2의 3승 개의(8개) 메모리frame
+int numProcess; // !!!선언해줘여댐
+int nframe;
+
+void initPhyMem(struct framePage *phyMem, int nFrame) {
+	int i;
+	for (i = 0; i < nFrame; i++) {
+		phyMem[i].number = i;
+		phyMem[i].pid = -1;
+		phyMem[i].virtualPageNumber = -1;
+		phyMem[i].lruLeft = &phyMem[(i - 1 + nFrame) % nFrame];
+		phyMem[i].lruRight = &phyMem[(i + 1 + nFrame) % nFrame];
+	}
+
+	oldestFrame = &phyMem[0];
+
+}
+
+void secondLevelVMSim(struct procEntry *procTable, struct framePage *phyMemFrames) {
+	int i;
+	int j;
+	int k;
+	int firstpagetableindex = countPage(firstLevelBits);
+	unsigned addr;
+	char rw;
+	int secondTnum = 32 - firstLevelBits - PAGESIZEBITS;
+	int secondTableIndex = countPage(secondTnum);
+	int quit = 0;
+	for (i = 0; i<numProcess; i++){
+		procTable[i].firstLevelPageTable = (struct pageTableEntry*)malloc(sizeof(struct pageTableEntry)*firstpagetableindex);
+
+		for (j = 0; j<firstpagetableindex; j++){
+			procTable[i].firstLevelPageTable[j].level = 1;
+			procTable[i].firstLevelPageTable[j].valid = 'x';
+
+		}
+	}
+
+	while (quit == 0){
+		for (i = 0; i < numProcess; i++){
+			if (fscanf(procTable[i].tracefp, "%x %c", &addr, &rw) == 2){
+
+				unsigned offset = (addr << 20) >> 20;
+				unsigned firstaddr = addr >> (32 - firstLevelBits);
+				unsigned secondaddr = addr << firstLevelBits;
+				secondaddr = secondaddr >> (32 - secondTnum);
+				procTable[i].ntraces++;
+				if (procTable[i].firstLevelPageTable[firstaddr].valid == 'x'){
+					procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable = (struct pageTableEntry*)malloc(sizeof(struct pageTableEntry)*secondTableIndex);
+					procTable[i].num2ndLevelPageTable++;
+					procTable[i].firstLevelPageTable[firstaddr].valid = 'o';
+					//2nd 테이블 초기화
+					for (j = 0; j < secondTableIndex; j++){
+						procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[j].valid = 'x';
+						procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[j].level = 2;
+					}
+					if (procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].valid == 'x'){
+						int temp1 = 0;
+						for (j = 0; j<nframe; j++){
+							if (phyMemFrames[j].pid == -1){
+								phyMemFrames[j].pid = i;
+								phyMemFrames[j].virtualAddress1 = firstaddr;
+								phyMemFrames[j].virtualAddress2 = secondaddr;
+								procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber = j;
+								procTable[oldestFrame->pid].firstLevelPageTable[oldestFrame->virtualAddress1].secondLevelPageTable[oldestFrame->virtualAddress2].valid = 'x';
+								procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber = oldestFrame->number;
+								oldestFrame->pid = i;
+								oldestFrame->virtualAddress1 = firstaddr;
+								oldestFrame->virtualAddress2 = secondaddr;
+								oldestFrame = oldestFrame->lruRight;
+								break;
+							}
+							else{
+								temp1++;
+							}
+						}
+						if (temp1 == nframe){
+
+							procTable[oldestFrame->pid].firstLevelPageTable[oldestFrame->virtualAddress1].secondLevelPageTable[oldestFrame->virtualAddress2].valid = 'x';
+							procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber = oldestFrame->number;
+							oldestFrame->pid = i;
+							oldestFrame->virtualAddress1 = firstaddr;
+							oldestFrame->virtualAddress2 = secondaddr;
+							oldestFrame = oldestFrame->lruRight;
+						}
+						procTable[i].numPageFault++;
+						procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].valid = 'o';
+
+					}
+				}
+				else{
+					if (procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].valid == 'x'){
+						int temp1 = 0;
+						for (j = 0; j<nframe; j++){
+							if (phyMemFrames[j].pid == -1){
+								phyMemFrames[j].pid = i;
+
+								phyMemFrames[j].virtualAddress1 = firstaddr;
+								phyMemFrames[j].virtualAddress2 = secondaddr;
+								procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber = j;
+								procTable[oldestFrame->pid].firstLevelPageTable[oldestFrame->virtualAddress1].secondLevelPageTable[oldestFrame->virtualAddress2].valid = 'x';
+								procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber = oldestFrame->number;
+								oldestFrame->pid = i;
+								oldestFrame->virtualAddress1 = firstaddr;
+								oldestFrame->virtualAddress2 = secondaddr;
+								oldestFrame = oldestFrame->lruRight;
+								break;
+							}
+							else{
+								temp1++;
+							}
+						}
+						if (temp1 == nframe){
+
+							procTable[oldestFrame->pid].firstLevelPageTable[oldestFrame->virtualAddress1].secondLevelPageTable[oldestFrame->virtualAddress2].valid = 'x';
+							procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber = oldestFrame->number;
+							oldestFrame->pid = i;
+							oldestFrame->virtualAddress1 = firstaddr;
+							oldestFrame->virtualAddress2 = secondaddr;
+							oldestFrame = oldestFrame->lruRight;
+
+						}
+
+						procTable[i].numPageFault++;
+						procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].valid = 'o';
+
+					}
+					else if (procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].valid == 'o'){
+
+						if (phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruRight->pid == oldestFrame->pid &&
+							phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruRight->virtualAddress1 == oldestFrame->virtualAddress1 &&
+							phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruRight->virtualAddress2 == oldestFrame->virtualAddress2){
+							procTable[i].numPageHit++;
+						}
+						else if (phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].pid == oldestFrame->pid &&
+							phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].virtualAddress1 == oldestFrame->virtualAddress1 &&
+							phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].virtualAddress2 == oldestFrame->virtualAddress2){
+							procTable[i].numPageHit++;
+							oldestFrame = oldestFrame->lruRight;
+						}
+
+						else{
+							procTable[i].numPageHit++;
+							struct framePage *tmpframe;
+							phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruLeft->lruRight = phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruRight;
+							phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruRight->lruLeft = phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruLeft;
+							tmpframe = oldestFrame->lruLeft;
+							oldestFrame->lruLeft = &phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber];
+							tmpframe->lruRight = &phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber];
+							phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruLeft = tmpframe;
+							phyMemFrames[procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber].lruRight = oldestFrame;
+						}
+
+					}
+
+				}
+
+				unsigned physicalAddressnotoffset = procTable[i].firstLevelPageTable[firstaddr].secondLevelPageTable[secondaddr].frameNumber;
+				unsigned physicalAddress = physicalAddressnotoffset << PAGESIZEBITS;
+				physicalAddress += offset;
+				printf("2Level procID %d traceNumber %d virtual addr %x pysical addr %x\n", i, procTable[i].ntraces, addr, physicalAddress);
+			}
+			else{
+				quit = 1;
+				break;
+			}
+		}
+	}
+
+
+	for (i = 0; i < numProcess; i++) {
+		printf("**** %s *****\n", procTable[i].traceName);
+		printf("Proc %d Num of traces %d\n", i, procTable[i].ntraces);
+		printf("Proc %d Num of second level page tables allocated %d\n", i, procTable[i].num2ndLevelPageTable);
+		printf("Proc %d Num of Page Faults %d\n", i, procTable[i].numPageFault);
+		printf("Proc %d Num of Page Hit %d\n", i, procTable[i].numPageHit);
+		assert(procTable[i].numPageHit + procTable[i].numPageFault == procTable[i].ntraces);
+	}
+}
+
+void invertedPageVMSim(struct procEntry *procTable, struct framePage *phyMemFrames, int nFrame) {
+	//최근 리스트 앞쪽! 앞에 계속 추가 페이지 폴트 일떄도
+
+	int i;
+	int k;
+	int j;
+	unsigned vpn;
+	int hash;
+	unsigned addr;
+	char rw;
+	int quit = 0;
+	struct invertedPageTableEntry *search = NULL;
+	struct invertedPageTableEntry **invertedPageTable = (struct invertedPageTableEntry**)malloc(sizeof(struct invertedPageTableEntry *)*nFrame);
+	for (i = 0; i < nFrame; i++){
+		invertedPageTable[i] = (struct invertedPageTableEntry *)malloc(sizeof(struct invertedPageTableEntry));
+		invertedPageTable[i] = NULL;
+	}
+	while (quit == 0){
+		for (i = 0; i < numProcess; i++){
+			if (fscanf(procTable[i].tracefp, "%x %c", &addr, &rw) == 2){
+
+				unsigned offset = (addr << 20) >> 20;
+				procTable[i].ntraces++;
+				vpn = addr >> PAGESIZEBITS;
+				hash = (vpn + i) % nFrame;
+				int find = 0;
+				search = invertedPageTable[hash];
+				if (search == NULL){
+					procTable[i].numIHTNULLAccess++;
+				}
+				else if (search != NULL){
+					procTable[i].numIHTNonNULLAccess++;
+				}
+
+				// hit
+				while (search != NULL){
+					procTable[i].numIHTConflictAccess++; // 해쉬테이블 접근 수 
+					if (search->pid == i && search->virtualPageNumber == vpn){
+						procTable[i].numPageHit++;
+						unsigned physicalAddressnotoffset = search->frameNumber;
+						unsigned physicalAddress = physicalAddressnotoffset << PAGESIZEBITS;
+						physicalAddress += offset;
+						printf("IHT procID %d traceNumber %d virtual addr %x pysical addr %x\n", i, procTable[i].ntraces, addr, physicalAddress);
+						find = 1;
+						if (search->frameNumber == oldestFrame->number){
+							oldestFrame = oldestFrame->lruRight;
+						}
+						else{
+							struct framePage *tmpframe;
+
+							phyMemFrames[search->frameNumber].lruLeft->lruRight = phyMemFrames[search->frameNumber].lruRight;
+							phyMemFrames[search->frameNumber].lruRight->lruLeft = phyMemFrames[search->frameNumber].lruLeft;
+
+							tmpframe = oldestFrame->lruLeft;
+							oldestFrame->lruLeft = &phyMemFrames[search->frameNumber];
+							tmpframe->lruRight = &phyMemFrames[search->frameNumber];
+							phyMemFrames[search->frameNumber].lruLeft = tmpframe;
+							phyMemFrames[search->frameNumber].lruRight = oldestFrame;
+						}
+						break;
+					}
+					else{
+						search = search->next;
+					}
+				}
+				//fault
+				if (find == 0){
+					procTable[i].numPageFault++;
+					struct invertedPageTableEntry *f = (struct invertedPageTableEntry *)malloc(sizeof(struct invertedPageTableEntry));
+					int temp1 = 0;
+					for (j = 0; j<nframe; j++){
+						if (phyMemFrames[j].pid == -1){
+							f->pid = i;
+							f->virtualPageNumber = vpn;
+							f->frameNumber = oldestFrame->number;
+							f->next = invertedPageTable[hash];
+							invertedPageTable[hash] = f;
+							oldestFrame->pid = i;
+							oldestFrame->virtualPageNumber = vpn;
+							oldestFrame = oldestFrame->lruRight;
+							unsigned physicalAddressnotoffset = f->frameNumber;
+							unsigned physicalAddress = physicalAddressnotoffset << PAGESIZEBITS;
+							physicalAddress += offset;
+							printf("IHT procID %d traceNumber %d virtual addr %x pysical addr %x\n", i, procTable[i].ntraces, addr, physicalAddress);
+							break;
+						}
+						else{
+							temp1++;
+						}
+					}
+					if (temp1 == nframe){
+						int fvpn = oldestFrame->virtualPageNumber;
+						int fip = oldestFrame->pid;
+						int fhash = (fvpn + fip) % nFrame;
+						struct invertedPageTableEntry *searchptr;
+						searchptr = invertedPageTable[fhash];
+						struct invertedPageTableEntry *temp2 = invertedPageTable[fhash]->next;
+						//struct invertedPageTableEntry *temp3;
+						// 기존꺼 해쉬테이블에서 삭제
+						if (searchptr->pid == fip && searchptr->virtualPageNumber == fvpn){
+							invertedPageTable[fhash] = searchptr->next;
+						}
+						else{
+							while (temp2 != NULL){
+
+								if (temp2->pid == fip && temp2->virtualPageNumber == fvpn){
+									if (temp2->next == NULL){
+										searchptr->next = NULL;
+									}
+									else{
+										searchptr->next = temp2->next;
+										//temp2->next = NULL;
+									}
+									break;
+								}
+								//	else{
+								searchptr = searchptr->next;
+								temp2 = temp2->next;
+								//	}
+
+							}
+						}
+
+						f->pid = i;
+						f->virtualPageNumber = vpn;
+						f->frameNumber = oldestFrame->number;
+						f->next = invertedPageTable[hash];
+						invertedPageTable[hash] = f;
+						oldestFrame->pid = i;
+						oldestFrame->virtualPageNumber = vpn;
+						oldestFrame = oldestFrame->lruRight;
+						unsigned physicalAddressnotoffset = f->frameNumber;
+						unsigned physicalAddress = physicalAddressnotoffset << PAGESIZEBITS;
+						physicalAddress += offset;
+
+						printf("IHT procID %d traceNumber %d virtual addr %x pysical addr %x\n", i, procTable[i].ntraces, addr, physicalAddress);
+
+					}
+
+
+				}
+			}
+			else{
+				quit = 1;
+				break;
+			}
+
+
+		}
+	}
+
+	for (i = 0; i < numProcess; i++) {
+		printf("**** %s *****\n", procTable[i].traceName);
+		printf("Proc %d Num of traces %d\n", i, procTable[i].ntraces);
+		printf("Proc %d Num of Inverted Hash Table Access Conflicts %d\n", i, procTable[i].numIHTConflictAccess);
+		printf("Proc %d Num of Empty Inverted Hash Table Access %d\n", i, procTable[i].numIHTNULLAccess);
+		printf("Proc %d Num of Non-Empty Inverted Hash Table Access %d\n", i, procTable[i].numIHTNonNULLAccess);
+		printf("Proc %d Num of Page Faults %d\n", i, procTable[i].numPageFault);
+		printf("Proc %d Num of Page Hit %d\n", i, procTable[i].numPageHit);
+		assert(procTable[i].numPageHit + procTable[i].numPageFault == procTable[i].ntraces);
+		assert(procTable[i].numIHTNULLAccess + procTable[i].numIHTNonNULLAccess == procTable[i].ntraces);
+	}
+}
+
+
+
+int main(int argc, char *argv[]) {
+	int i;
+	int j;
+	int k;
+	firstLevelBits = atoi(argv[1]);//
+	phyMemSizeBits = atoi(argv[2]);//
+	//int nFrame = (1 << (phyMemSizeBits - PAGESIZEBITS)); assert(nFrame>0);
+	//nframe = countPage(phyMemSizeBits-12);
+	nframe = (1 << (phyMemSizeBits - PAGESIZEBITS)); assert(nframe>0);
+	numProcess = argc - 3;//
+
+
+	if (argc < 4) {
+		printf("Usage : %s firstLevelBits PhysicalMemorySizeBits TraceFileNames\n", argv[0]); exit(1);
+	}
+
+	if (phyMemSizeBits < PAGESIZEBITS) {
+		printf("PhysicalMemorySizeBits %d should be larger than PageSizeBits %d\n", phyMemSizeBits, PAGESIZEBITS); exit(1);
+	}
+	if (VIRTUALADDRBITS - PAGESIZEBITS - firstLevelBits <= 0) {
+		printf("firstLevelBits %d is too Big\n", firstLevelBits); exit(1);
+	}
+
+	// initialize procTable for two-level page table
+	struct procEntry *procTable = (struct procEntry*)malloc(sizeof(struct procEntry)*numProcess); // procEntry 입력파일 input tracefile
+
+	struct framePage *fp = (struct framePage*)malloc(sizeof(struct framePage)*nframe);
+
+	initPhyMem(fp, nframe);
+	oldestFrame = &fp[0];
+
+
+
+	for (i = 0; i < numProcess; i++) {
+		// opening a tracefile for the process
+		//프로스세ㅡ 테이블 초기화
+		printf("process %d opening %s\n", i, argv[i + 3]);
+		procTable[i].tracefp = fopen(argv[i + 3], "r");
+		procTable[i].pid = i;
+		procTable[i].traceName = argv[i + 3];
+		procTable[i].ntraces = 0;
+		procTable[i].num2ndLevelPageTable = 0;	// The 2nd level page created(allocated);
+		procTable[i].numIHTConflictAccess = 0; 	// The number of Inverted Hash Table Conflict Accesses
+		procTable[i].numIHTNULLAccess = 0;		// The number of Empty Inverted Hash Table Accesses
+		procTable[i].numIHTNonNULLAccess = 0;		// The number of Non Empty Inverted Hash Table Accesses
+		procTable[i].numPageFault = 0;			// The number of page faults
+		procTable[i].numPageHit = 0;
+
+
+
+	}
+	printf("=============================================================\n");
+	printf("\nNum of Frames %d Physical Memory Size %ld bytes\n", nframe, (1L << phyMemSizeBits));
+	printf("=============================================================\n");
+	printf("The 2nd Level Page Table Memory Simulation Starts .....\n");
+	printf("=============================================================\n");
+	secondLevelVMSim(procTable, fp);
+
+	// initialize procTable for the inverted Page Table
+	for (i = 0; i < numProcess; i++) {
+		// rewind tracefiles
+		rewind(procTable[i].tracefp);
+	}
+
+	printf("=============================================================\n");
+	printf("The Inverted Page Table Memory Simulation Starts .....\n");
+	printf("=============================================================\n");
+	initPhyMem(fp, nframe);
+	for (i = 0; i < numProcess; i++) {
+		// opening a tracefile for the process
+		//프로스세ㅡ 테이블 초기화
+		free(procTable[i].firstLevelPageTable);
+		procTable[i].pid = i;
+		procTable[i].traceName = argv[i + 3];
+		procTable[i].ntraces = 0;
+		procTable[i].num2ndLevelPageTable = 0;	// The 2nd level page created(allocated);
+		procTable[i].numIHTConflictAccess = 0; 	// The number of Inverted Hash Table Conflict Accesses
+		procTable[i].numIHTNULLAccess = 0;		// The number of Empty Inverted Hash Table Accesses
+		procTable[i].numIHTNonNULLAccess = 0;		// The number of Non Empty Inverted Hash Table Accesses
+		procTable[i].numPageFault = 0;			// The number of page faults
+		procTable[i].numPageHit = 0;
+	}
+
+	invertedPageVMSim(procTable, fp, nframe);
+
+	return(0);
+}
